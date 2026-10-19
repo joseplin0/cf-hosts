@@ -164,10 +164,116 @@ refresh_cron(){
   } | crontab - 2>/dev/null && log "已更新 cron 定时（每 $INTERVAL 分钟 + 开机）" || log "写入 crontab 失败"
 }
 
+# ---- 全局命令注册 / 注销 ----
+# 非 root 也能用：优先写入用户级目录（~/.local/bin、~/bin），无需 sudo；
+# 都不可写时依次尝试系统目录、免密 sudo，最后退回 alias 写进 shell 配置。
+CMD_MARK="# >>> cf-hosts >>>"
+
+guess_rc(){ # 找一个可写的 shell 启动文件（CF_RC 可覆盖，便于测试）
+  if [ -n "${CF_RC:-}" ]; then echo "$CF_RC"; return; fi
+  local f
+  for f in "$HOME/.bashrc" "$HOME/.zshrc" "$HOME/.profile"; do
+    [ -e "$f" ] && { echo "$f"; return; }
+  done
+  echo "$HOME/.profile"
+}
+
+bin_dirs(){ # 候选安装目录（BIN_DIRS 可覆盖；root 优先系统目录，普通用户优先自己的目录）
+  if [ -n "${BIN_DIRS:-}" ]; then echo "$BIN_DIRS"; return; fi
+  if [ "$(id -u 2>/dev/null)" = "0" ]; then
+    echo "/usr/local/bin /usr/bin /bin"
+  else
+    echo "$HOME/.local/bin $HOME/bin /usr/local/bin /usr/bin /bin"
+  fi
+}
+
+cmd_link(){
+  local target="$CF_HOME/cf-hosts.sh" ok="" d
+  [ -f "$target" ] || { echo "找不到脚本: $target"; return 1; }
+
+  for d in $(bin_dirs); do
+    [ -n "$d" ] || continue
+    if [ ! -d "$d" ]; then mkdir -p "$d" 2>/dev/null || continue; fi
+    [ -w "$d" ] || continue
+    rm -f "$d/cf-hosts" 2>/dev/null
+    # 某些系统 ln 失败会留下空/坏文件，成功条件用“是软链 或 非空”
+    if ln -sf "$target" "$d/cf-hosts" 2>/dev/null && { [ -L "$d/cf-hosts" ] || [ -s "$d/cf-hosts" ]; }; then
+      ok="$d/cf-hosts"; break
+    fi
+    rm -f "$d/cf-hosts" 2>/dev/null
+  done
+
+  # 目录都不可写：若有无密码 sudo，用它装到系统目录（SUDO_BIN_DIR 可改目标）
+  if [ -z "$ok" ] && [ "$(id -u 2>/dev/null)" != "0" ] \
+     && command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
+    local sbin="${SUDO_BIN_DIR:-/usr/local/bin}"
+    if sudo ln -sf "$target" "$sbin/cf-hosts" 2>/dev/null && [ -e "$sbin/cf-hosts" ]; then
+      ok="$sbin/cf-hosts"
+    fi
+  fi
+
+  local rc; rc="$(guess_rc)"
+  if [ -n "$ok" ]; then
+    echo "已注册全局命令: $ok"
+    local bind; bind="$(cd -P "$(dirname "$ok")" 2>/dev/null && pwd)"
+    case ":${PATH:-}:" in
+      *":$bind:"*) echo "用法: cf-hosts update   /   cf-hosts domains add <域名>   /   cf-hosts status" ;;
+      *)
+        if printf '%s\n' "$CMD_MARK export PATH=\"$bind:\$PATH\"" >> "$rc" 2>/dev/null; then
+          echo "该目录不在 PATH，已写入 $rc"
+          echo "当前终端执行: export PATH=\"$bind:\$PATH\"   或重开终端"
+        else
+          echo "该目录不在 PATH，请手动执行: export PATH=\"$bind:\$PATH\""
+        fi ;;
+    esac
+    return 0
+  fi
+
+  # 兜底：写 alias（只有 ~/.local/bin、~/bin、/usr/local/bin 全都不可写时才会走到这里）
+  echo "没有任何可写的 PATH 目录，改用 alias"
+  if printf '%s\n' "$CMD_MARK alias cf-hosts='bash \"$target\"'" >> "$rc" 2>/dev/null; then
+    echo "已写入 $rc，当前终端执行: source $rc"
+  else
+    echo "请手动执行: alias cf-hosts='bash \"$target\"'"
+  fi
+  [ "$(id -u 2>/dev/null)" = "0" ] \
+    || echo "或用 sudo 重装一次完成全局注册: sudo bash $(dirname "$target")/install.sh"
+  echo "或直接全路径运行: bash $target <命令>"
+}
+
+cmd_unlink(){
+  local d tgt removed=""
+  for d in $(bin_dirs) /usr/local/bin /usr/bin /bin "$HOME/.local/bin" "$HOME/bin"; do
+    [ -d "$d" ] || continue
+    [ -L "$d/cf-hosts" ] || continue
+    tgt="$(readlink "$d/cf-hosts" 2>/dev/null)"
+    # 只删指向本安装的链接，避免误删别人的 cf-hosts
+    case "$tgt" in "$CF_HOME"/*|"$CF_HOME")
+      rm -f "$d/cf-hosts" 2>/dev/null && removed="$removed $d/cf-hosts" ;;
+    esac
+  done
+  # sudo 装的（无权限读取链接目标时也能删）
+  if [ -L /usr/local/bin/cf-hosts ] && [ "$(id -u 2>/dev/null)" != "0" ] \
+     && command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
+    sudo rm -f /usr/local/bin/cf-hosts 2>/dev/null && removed="$removed /usr/local/bin/cf-hosts"
+  fi
+  local rc; rc="$(guess_rc)"
+  if [ -f "$rc" ] && grep -qF "$CMD_MARK" "$rc" 2>/dev/null; then
+    # 用 awk 而非 grep -v：行被删光时 grep -v 会返回 1 把 && 短路掉
+    awk -v m="$CMD_MARK" 'index($0,m)==0 {print}' "$rc" > "$rc.cfhosts.tmp" 2>/dev/null
+    if [ -f "$rc.cfhosts.tmp" ]; then
+      mv "$rc.cfhosts.tmp" "$rc" 2>/dev/null && echo "已清理 $rc 中的 cf-hosts 配置行" \
+        || rm -f "$rc.cfhosts.tmp" 2>/dev/null
+    fi
+  fi
+  if [ -n "$removed" ]; then echo "已移除:$(echo "$removed" | tr ' ' '\n' | sort -u | tr '\n' ' ')";
+  else echo "未发现已注册的 cf-hosts 命令"; fi
+}
+
 usage(){
   cat <<EOF
 cf-hosts（纯 shell，零依赖）
-用法: cf-hosts <命令> [参数]        # 安装后任何目录直接打 cf-hosts
+用法: cf-hosts <命令> [参数]        # 注册后任何目录直接打 cf-hosts
       bash <安装目录>/cf-hosts.sh <命令> [参数]   # 或全路径运行
   update                 立即优选一次并写入 hosts
   ip                     当前优选 IP
@@ -179,6 +285,8 @@ cf-hosts（纯 shell，零依赖）
   auto on|off            开关自动更新
   refresh                重写 cron 定时
   clean                  清理 hosts 里的 cf-hosts 托管区段
+  link                   （重新）注册全局命令 cf-hosts（非 root 会自动用 ~/bin）
+  unlink                 注销全局命令
   help                   显示帮助
 EOF
 }
@@ -194,6 +302,9 @@ case "${1:-}" in
     echo "  hosts  : $HOSTS"
     if [ -x "$CF_BIN" ]; then echo "  测速   : $CF_BIN"
     else echo "  测速   : 内置探针（curl，未安装 CloudflareSpeedTest 时自动启用）"; fi
+    _c="$(command -v cf-hosts 2>/dev/null)"
+    if [ -n "$_c" ]; then echo "  命令   : 已注册 -> $_c"
+    else echo "  命令   : 未注册（root 下重跑 install.sh，或执行 cf-hosts link）"; fi
     echo "  日志   : $LOG" ;;
   domains)
     action="${2:-list}"
@@ -207,5 +318,7 @@ case "${1:-}" in
   refresh)  refresh_cron ;;
   clean)    clean_hosts; echo "已清理 $HOSTS 中的 cf-hosts 托管区段" ;;
   help|"")  usage ;;
+  link)     cmd_link ;;
+  unlink)   cmd_unlink ;;
   *)        echo "未知命令: $1"; usage ;;
 esac

@@ -8,11 +8,8 @@ if command -v crontab >/dev/null 2>&1; then
   ( crontab -l 2>/dev/null | grep -v 'cf-hosts' ) | crontab - 2>/dev/null || true
 fi
 
-# 2) 删除全局命令符号链接（符号链接或 ln 失败留下的 0 字节文件；不碰有内容的真文件）
-for bindir in ${BIN_DIRS:-/usr/local/bin /usr/bin /bin}; do
-  f="$bindir/cf-hosts"
-  if [ -L "$f" ] || { [ -f "$f" ] && [ ! -s "$f" ]; }; then rm -f "$f" 2>/dev/null; fi
-done
+# 2) 注销全局命令（含 ~/.local/bin、~/bin、sudo 安装的；同步清掉 shell 配置里的 PATH/alias 行）
+bash "$DIR/cf-hosts.sh" unlink || true
 
 # 3) 清理 hosts 托管区段
 bash "$DIR/cf-hosts.sh" clean || true

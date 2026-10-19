@@ -84,47 +84,90 @@ arch_ga(){ case "$(uname -m)" in x86_64|amd64) echo amd64;; aarch64|arm64) echo 
 os_lc(){ case "$(uname -s | tr 'A-Z' 'a-z')" in linux*) echo linux;; darwin*) echo darwin;; *) echo "";; esac; }
 
 # 1) 下载 CloudflareSpeedTest（如缺）——非致命：下不到就用内置探针（curl 测 TTFB）
-CF="$DIR/CloudflareSpeedTest"
-if [ ! -x "$CF" ]; then
-  GA=$(arch_ga); OS=$(os_lc)
-  if [ -z "$OS" ]; then
-    say "当前系统($(uname -s))无对应 CloudflareSpeedTest 发行版——将启用内置探针（curl 测 TTFB），不影响使用"
-  else
-  # 取最新版本号：api.github.com 失败时回退 kkgithub 镜像 API
-  VER=$(curl -fsSL --connect-timeout 10 --max-time 20 https://api.github.com/repos/XIU2/CloudflareSpeedTest/releases/latest 2>/dev/null | grep -m1 '"tag_name"' | sed -E 's/.*"v?([0-9][^"]*)".*/\1/')
-  if [ -z "${VER:-}" ]; then
-    VER=$(curl -fsSL --connect-timeout 10 --max-time 20 https://api.kkgithub.com/repos/XIU2/CloudflareSpeedTest/releases/latest 2>/dev/null | grep -m1 '"tag_name"' | sed -E 's/.*"v?([0-9][^"]*)".*/\1/')
-  fi
-  if [ -n "${VER:-}" ]; then
-    REL="https://github.com/XIU2/CloudflareSpeedTest/releases/download/v${VER}"
-    ok=0
-    # 新版资产名 cfst_*（v2.3+），旧版 CloudflareSpeedTest_*，依次尝试
-    for NAME in "cfst_${VER}_${OS}_${GA}.tar.gz" "CloudflareSpeedTest_${VER}_${OS}_${GA}.tar.gz"; do
-      for u in "$REL/$NAME" "https://ghfast.top/$REL/$NAME" "https://gh-proxy.com/$REL/$NAME" "https://ghproxy.net/$REL/$NAME"; do
-        say "尝试下载: $u"
-        rm -f "$DIR/cst.tar.gz"
-        if curl -fL --connect-timeout 10 --max-time 300 "$u" -o "$DIR/cst.tar.gz" 2>/dev/null && tar -tzf "$DIR/cst.tar.gz" >/dev/null 2>&1; then
-          if tar -xzf "$DIR/cst.tar.gz" -C "$DIR" 2>/dev/null && [ -f "$CF" ]; then
-            chmod +x "$CF"; ok=1; rm -f "$DIR/cst.tar.gz"; break 2
-          fi
-          # 有些版本解压在子目录里，捞一下
-          find "$DIR" -maxdepth 2 -type f -name CloudflareSpeedTest 2>/dev/null | head -1 | while read -r bf; do
-            [ -n "$bf" ] && mv -f "$bf" "$CF" 2>/dev/null
-          done
-          if [ -f "$CF" ]; then chmod +x "$CF"; ok=1; rm -f "$DIR/cst.tar.gz"; break 2; fi
-        fi
-      done
-    done
-    if [ "$ok" != "1" ]; then
-      rm -f "$DIR/cst.tar.gz"
-      say "CloudflareSpeedTest 下载失败（GitHub release 在国内常被 502/重置）——不影响使用"
-      say "将自动启用内置探针（curl 测 TTFB 选最快 IP，零外部二进制）"
-    fi
-  else say "取不到 CloudflareSpeedTest 版本号（GitHub API 限流?）——将启用内置探针，不影响使用"; fi
-  fi
-else say "已存在 CloudflareSpeedTest"; fi
+#    注意：资产文件名一律从 releases API 读取，绝不手拼（作者改过命名规则，
+#    旧教程里的 CloudflareSpeedTest_<版本>_linux_amd64.tar.gz 早已是 404）
+CFST=""
+if   [ -f "$DIR/cfst" ];                then CFST="$DIR/cfst"
+elif [ -f "$DIR/CloudflareSpeedTest" ]; then CFST="$DIR/CloudflareSpeedTest"
+elif [ -f "$DIR/cf-hosts.conf" ]; then
+  # 已装过但二进制在别处：沿用配置里的路径
+  _cb=$(sed -n 's/^CF_BIN="\{0,1\}\([^"]*\)"\{0,1\}$/\1/p' "$DIR/cf-hosts.conf" | head -1)
+  [ -n "${_cb:-}" ] && CFST="$_cb"
+fi
 
-# 2) 生成配置（缺失才建）
+if [ -n "$CFST" ]; then
+  say "已存在测速二进制: $CFST"
+else
+  OS=$(os_lc); GA=$(arch_ga)
+  if [ -z "$OS" ]; then
+    say "当前系统($(uname -s))无对应 CloudflareSpeedTest 发行版 —— 启用内置探针（curl 测 TTFB），不影响使用"
+  else
+    API_URL="https://api.github.com/repos/XIU2/CloudflareSpeedTest/releases/latest"
+    [ -n "${CFST_VERSION:-}" ] && API_URL="https://api.github.com/repos/XIU2/CloudflareSpeedTest/releases/tags/v${CFST_VERSION#v}"
+    JSON=$(curl -fsSL --connect-timeout 10 --max-time 30 "$API_URL" 2>/dev/null)
+    [ -z "${JSON:-}" ] && JSON=$(curl -fsSL --connect-timeout 10 --max-time 30 "https://api.kkgithub.com/repos/XIU2/CloudflareSpeedTest/releases/latest" 2>/dev/null)
+    VER=$(printf '%s\n' "$JSON" | grep -m1 '"tag_name"' | sed -E 's/.*"v?([0-9][^"]*)".*/\1/')
+    # 按当前平台挑出真实资产 URL：排除 *_old 兼容包，限制扩展名/OS/架构
+    ASSET=$(printf '%s\n' "$JSON" \
+      | grep -o '"browser_download_url": *"[^"]*"' \
+      | sed -E 's/.*"browser_download_url": *"([^"]*)".*/\1/' \
+      | while read -r u; do
+          n="${u##*/}"
+          case "$n" in *_old.*) continue;; esac
+          case "$n" in *.tar.gz|*.tgz|*.zip) ;; *) continue;; esac
+          case "$n" in *"$OS"*) ;; *) continue;; esac
+          case "$n" in *"$GA"*) ;; *) continue;; esac
+          echo "$u"; break
+        done)
+    if [ -z "${ASSET:-}" ]; then
+      say "取不到匹配的资产（GitHub API 不可达或限流）—— 启用内置探针，不影响使用"
+    else
+      say "CloudflareSpeedTest v${VER}，资产 ${ASSET##*/}（文件名取自 releases API）"
+      DL="$DIR/.cfst_dl"; ok=0; SRC_OK=""
+      # 直连在国内常被 reset/空回复，优先走实测可用的镜像
+      for u in "$ASSET" "https://gh-proxy.com/$ASSET" "https://ghfast.top/$ASSET" "https://ghproxy.net/$ASSET" "https://mirror.ghproxy.com/$ASSET"; do
+        [ "$ok" = "1" ] && break
+        say "尝试: $(printf '%s' "$u" | cut -c1-76)..."
+        rm -f "$DL" 2>/dev/null
+        curl -fL --connect-timeout 10 --max-time 300 "$u" -o "$DL" 2>/dev/null
+        [ -s "$DL" ] || { say "  ✘ 下载失败"; continue; }
+        case "$u" in
+          *.zip)
+            command -v unzip >/dev/null 2>&1 || { say "  ✘ 需要 unzip，系统没有"; continue; }
+            unzip -o -q "$DL" -d "$DIR" 2>/dev/null || { say "  ✘ 解压失败"; continue; } ;;
+          *)
+            tar -xzf "$DL" --strip-components=1 -C "$DIR" 2>/dev/null \
+              || tar -xzf "$DL" -C "$DIR" 2>/dev/null \
+              || { say "  ✘ 解压失败"; continue; } ;;
+        esac
+        # 二进制可能在解压出的子目录里，统一提到安装目录根
+        _b=$(find "$DIR" -maxdepth 2 -type f \( -name cfst -o -name CloudflareSpeedTest \) 2>/dev/null | head -1)
+        if [ -n "${_b:-}" ]; then
+          _base="${_b##*/}"
+          [ "$_b" != "$DIR/$_base" ] && mv -f "$_b" "$DIR/$_base" 2>/dev/null
+          chmod +x "$DIR/$_base" 2>/dev/null
+        fi
+        # 是否真的可执行由运行时判定（有些 NAS/共享目录 chmod 不生效，
+        # 这里不因 -x 失败就丢弃已下载好的二进制，cf-hosts.sh 会自动回退内置探针）
+        if   [ -f "$DIR/cfst" ];                then CFST="$DIR/cfst"; ok=1
+        elif [ -f "$DIR/CloudflareSpeedTest" ]; then CFST="$DIR/CloudflareSpeedTest"; ok=1
+        else say "  ✘ 包内没找到可执行文件"; fi
+        rm -f "$DL" 2>/dev/null
+      done
+      if [ "$ok" = "1" ]; then
+        if [ -x "$CFST" ]; then
+          say "✔ 测速二进制就位: $CFST"
+        else
+          say "⚠ 已放置 $CFST，但该目录无法设置执行位（只读/受限），运行时会自动改用内置探针"
+        fi
+      else
+        say "所有下载源均失败（GitHub release 在国内常被重置/502）—— 启用内置探针（curl 测 TTFB，零外部二进制），不影响使用"
+      fi
+    fi
+  fi
+fi
+
+# 2) 生成配置（缺失才建）；已存在则把 CF_BIN 同步到真实二进制路径
 if [ ! -f "$DIR/cf-hosts.conf" ]; then
   cat > "$DIR/cf-hosts.conf" <<EOF
 PORT=9876
@@ -135,9 +178,14 @@ MAX_MS=200
 MAX_LOSS=0
 HOSTS="/etc/hosts"
 DOMAINS=""
-CF_BIN="$CF"
+CF_BIN="${CFST:-$DIR/CloudflareSpeedTest}"
 EOF
   say "已生成 cf-hosts.conf"
+elif [ -n "$CFST" ]; then
+  awk -v v="$CFST" '{ if ($0 ~ /^CF_BIN=/) print "CF_BIN=\""v"\""; else print }' \
+    "$DIR/cf-hosts.conf" > "$DIR/cf-hosts.conf.tmp" \
+    && mv "$DIR/cf-hosts.conf.tmp" "$DIR/cf-hosts.conf" \
+    && say "已同步配置里的 CF_BIN -> $CFST"
 fi
 
 # 3) 注册 cron 定时（开机 + 每 N 分钟）
@@ -147,30 +195,21 @@ bash "$DIR/cf-hosts.sh" refresh || true
 say "立即执行一次优选 ..."
 bash "$DIR/cf-hosts.sh" update || true
 
-# 5) 注册全局命令（符号链接进 PATH 目录，之后任何目录直接打 cf-hosts）
-CMD_OK=""
-for bindir in ${BIN_DIRS:-/usr/local/bin /usr/bin /bin}; do
-  [ -d "$bindir" ] && [ -w "$bindir" ] || continue
-  rm -f "$bindir/cf-hosts" 2>/dev/null
-  if ln -sf "$DIR/cf-hosts.sh" "$bindir/cf-hosts" 2>/dev/null && { [ -L "$bindir/cf-hosts" ] || [ -s "$bindir/cf-hosts" ]; }; then
-    CMD_OK="$bindir/cf-hosts"; break
-  fi
-  rm -f "$bindir/cf-hosts" 2>/dev/null   # ln 失败可能留下垃圾文件，清掉再试下一个目录
-done
-if [ -n "$CMD_OK" ]; then
-  say "已注册全局命令: $CMD_OK（任何目录直接: cf-hosts update / cf-hosts domains add ...）"
-else
-  say "未能写入 /usr/local/bin（需要 root）。手动注册: ln -sf $DIR/cf-hosts.sh /usr/local/bin/cf-hosts"
-  say "或加 alias: echo \"alias cf-hosts='bash $DIR/cf-hosts.sh'\" >> ~/.bashrc"
-fi
+# 5) 注册全局命令（自动选目录：root→/usr/local/bin，普通用户→~/.local/bin，均无权限则 alias）
+LINK_OUT=$(bash "$DIR/cf-hosts.sh" link 2>&1)
+printf '%s\n' "$LINK_OUT"
 
 LANIP=$(hostname -I 2>/dev/null | awk '{print $1}')
 say "完成 ✅  安装目录: $DIR"
-if [ -x "$DIR/CloudflareSpeedTest" ]; then
-  say "测速方式: CloudflareSpeedTest 二进制"
+if [ -n "${CFST:-}" ] && [ -x "$CFST" ]; then
+  say "测速方式: CloudflareSpeedTest 二进制 -> $CFST"
 else
-  say "测速方式: 内置探针（curl 测 TTFB，零外部二进制；想要完整测速可手动放 CloudflareSpeedTest 到 $DIR）"
+  say "测速方式: 内置探针（curl 测 TTFB，零外部二进制）；手里有 cfst 二进制放进 $DIR 即可自动切换为完整测速"
 fi
+case "$LINK_OUT" in
+  *"已注册全局命令"*) : ;;   # 成功：按 link 自己的提示操作即可
+  *) say "提示: 想装到 /usr/local/bin 给所有用户用，可 sudo 重跑一次: sudo bash $DIR/install.sh" ;;
+esac
 say "加站点 : cf-hosts domains add tracker.你的域名.com"
 say "看状态 : cf-hosts status"
 say "改频率 : cf-hosts interval 30"
