@@ -1,0 +1,10 @@
+# cf-hosts 配置样例 —— 安装时会自动生成 cf-hosts.conf，可参考本文件手改
+PORT=9876
+INTERVAL=60            # 自动优选间隔（分钟）
+AUTO=on                # on=自动 / off=只手动
+USE_IPV6=off           # on=优选 IPv6 / off=优选 IPv4
+MAX_MS=200             # 延迟上限(ms)，太大不准、太小可能选不出
+MAX_LOSS=0             # 丢包率上限(%)，0=只要零丢包
+HOSTS="/etc/hosts"     # Windows 改为 C:\Windows\System32\drivers\etc\hosts
+DOMAINS=""             # PT tracker 域名，空格分隔，如 "t1.com t2.com"
+CF_BIN="/share/Container/cf-hosts/CloudflareSpeedTest"

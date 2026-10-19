@@ -1,0 +1,133 @@
+#!/usr/bin/env bash
+# cf-hosts — 自动优选 Cloudflare IP 写入 hosts 托管区段（纯 shell，零运行时依赖）
+# 解决 PT tracker / Cloudflare 站点在国内宽带（尤其移动）下连不上。
+set -u
+CF_HOME="${CF_HOME:-$(cd "$(dirname "$0")" && pwd)}"
+CONF="$CF_HOME/cf-hosts.conf"
+STATE="$CF_HOME/state"
+LOG="$CF_HOME/cf-hosts.log"
+BEGIN="# >>> cf-hosts BEGIN >>>"
+END="# >>> cf-hosts END >>>"
+
+# ---- 默认值（被 cf-hosts.conf 覆盖）----
+PORT=9876
+INTERVAL=60
+AUTO=on
+USE_IPV6=off
+MAX_MS=200
+MAX_LOSS=0
+HOSTS="/etc/hosts"
+DOMAINS=""
+CF_BIN="$CF_HOME/CloudflareSpeedTest"
+[ -f "$CONF" ] && . "$CONF"
+
+log(){ echo "[$(date '+%F %T')] $*" | tee -a "$LOG" >&2; }
+
+save_conf(){
+  cat > "$CONF" <<EOF
+# cf-hosts 配置（改完对 update / 定时立即生效）
+PORT=$PORT
+INTERVAL=$INTERVAL
+AUTO=$AUTO
+USE_IPV6=$USE_IPV6
+MAX_MS=$MAX_MS
+MAX_LOSS=$MAX_LOSS
+HOSTS="$HOSTS"
+DOMAINS="$DOMAINS"
+CF_BIN="$CF_BIN"
+EOF
+}
+
+best_ip(){
+  [ -x "$CF_BIN" ] || { log "找不到可执行的 CloudflareSpeedTest: $CF_BIN"; echo ""; return; }
+  local out="$CF_HOME/result.csv" ip=""
+  if [ "$USE_IPV6" = "on" ]; then
+    "$CF_BIN" -ipv6 -tl "$MAX_MS" -tll "$MAX_LOSS" -n 200 -o "$out" >/dev/null 2>&1
+    ip=$(grep -oE '^[0-9a-fA-F]{0,4}:[0-9a-fA-F:]+' "$out" 2>/dev/null | head -1)
+  else
+    "$CF_BIN" -ipv4 -tl "$MAX_MS" -tll "$MAX_LOSS" -n 200 -o "$out" >/dev/null 2>&1
+    ip=$(grep -oE '^[0-9]{1,3}(\.[0-9]{1,3}){3}' "$out" 2>/dev/null | head -1)
+  fi
+  echo "$ip"
+}
+
+update_hosts(){ # $1=ip
+  awk -v b="$BEGIN" -v e="$END" -v ip="$1" -v doms="$DOMAINS" '
+    $0==b{skip=1;next} $0==e{skip=0;next} !skip{print}
+    END{ print b; n=split(doms,a," "); for(i=1;i<=n;i++) if(a[i]!="") print ip"\t"a[i]; print e }
+  ' "$HOSTS" > "$HOSTS.cfhosts.tmp" && mv "$HOSTS.cfhosts.tmp" "$HOSTS"
+}
+
+clean_hosts(){
+  awk -v b="$BEGIN" -v e="$END" '$0==b{skip=1;next} $0==e{skip=0;next} !skip{print}' \
+    "$HOSTS" > "$HOSTS.cfhosts.tmp" && mv "$HOSTS.cfhosts.tmp" "$HOSTS"
+}
+
+cmd_update(){
+  local fam=IPv4; [ "$USE_IPV6" = "on" ] && fam=IPv6
+  local ip; ip=$(best_ip)
+  if [ -z "$ip" ]; then log "更新失败：未获取到优选 IP（检查 CF_BIN/网络，或调大 MAX_MS/MAX_LOSS）"; return 1; fi
+  update_hosts "$ip"
+  echo "$ip" > "$STATE"
+  log "优选 $fam = $ip 已写入 $HOSTS（域名：${DOMAINS:-无}）"
+}
+
+refresh_cron(){
+  command -v crontab >/dev/null 2>&1 || { log "无 crontab，请用系统任务计划手动加定时"; return 0; }
+  local keep; keep=$(crontab -l 2>/dev/null | grep -v 'cf-hosts')
+  {
+    echo "$keep"
+    echo "# cf-hosts"
+    [ "$AUTO" = "on" ] || return 0
+    echo "@reboot \"$CF_HOME/cf-hosts.sh\" update >> \"$LOG\" 2>&1"
+    if [ "$INTERVAL" -ge 1 ] 2>/dev/null && [ "$INTERVAL" -le 60 ]; then
+      echo "*/$INTERVAL * * * * \"$CF_HOME/cf-hosts.sh\" update >> \"$LOG\" 2>&1"
+    else
+      echo "0 * * * * \"$CF_HOME/cf-hosts.sh\" update >> \"$LOG\" 2>&1"
+    fi
+  } | crontab - 2>/dev/null && log "已更新 cron 定时（每 $INTERVAL 分钟 + 开机）" || log "写入 crontab 失败"
+}
+
+usage(){
+  cat <<EOF
+cf-hosts（纯 shell，零依赖）
+用法: bash cf-hosts.sh <命令> [参数]
+  update                 立即优选一次并写入 hosts
+  ip                     当前优选 IP
+  status                 状态总览
+  domains                列出 tracker 域名
+  domains add <d...>     添加域名
+  domains remove <d...>  删除域名
+  interval <分钟>        设置频率（如 30；0=仅开机跑）
+  auto on|off            开关自动更新
+  refresh                重写 cron 定时
+  clean                  清理 hosts 里的 cf-hosts 托管区段
+  help                   显示帮助
+EOF
+}
+
+case "${1:-}" in
+  update)  cmd_update ;;
+  ip)      cat "$STATE" 2>/dev/null || echo "—" ;;
+  status)
+    echo "cf-hosts 状态"
+    echo "  当前IP : $(cat "$STATE" 2>/dev/null || echo '—')"
+    echo "  域名   : ${DOMAINS:-（空）}"
+    echo "  频率   : 每 ${INTERVAL} 分钟（auto=$AUTO, ipv6=$USE_IPV6, 延迟<${MAX_MS}ms, 丢包<${MAX_LOSS}%）"
+    echo "  hosts  : $HOSTS"
+    echo "  测速   : $CF_BIN"
+    echo "  日志   : $LOG" ;;
+  domains)
+    action="${2:-list}"
+    case "$action" in
+      add)    shift 2; for d in "$@"; do case " $DOMAINS " in *" $d "*) ;; *) DOMAINS="${DOMAINS:+$DOMAINS }$d";; esac; done; save_conf; echo "${DOMAINS:-（空）}" ;;
+      remove) shift 2; for d in "$@"; do DOMAINS=$(echo " $DOMAINS " | sed "s/ $d / /g" | xargs); done; save_conf; echo "${DOMAINS:-（空）}" ;;
+      *)      echo "${DOMAINS:-（空）}" ;;
+    esac ;;
+  interval) INTERVAL="${2:-60}"; save_conf; refresh_cron; echo "interval=$INTERVAL 分钟" ;;
+  auto)     AUTO="${2:-on}"; save_conf; refresh_cron; echo "auto=$AUTO" ;;
+  refresh)  refresh_cron ;;
+  clean)    clean_hosts; echo "已清理 $HOSTS 中的 cf-hosts 托管区段" ;;
+  help|"")  usage ;;
+  *)        echo "未知命令: $1"; usage ;;
+esac

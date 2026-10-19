@@ -1,0 +1,11 @@
+# 运行时生成的文件，不提交
+cf-hosts.conf
+result.csv
+cf-hosts.log
+state
+serve.log
+update.log
+CloudflareSpeedTest
+*.tar.gz
+*.tmp
+.DS_Store
