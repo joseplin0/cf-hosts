@@ -101,10 +101,27 @@ bash "$DIR/cf-hosts.sh" refresh || true
 say "立即执行一次优选 ..."
 bash "$DIR/cf-hosts.sh" update || true
 
+# 5) 注册全局命令（符号链接进 PATH 目录，之后任何目录直接打 cf-hosts）
+CMD_OK=""
+for bindir in ${BIN_DIRS:-/usr/local/bin /usr/bin /bin}; do
+  [ -d "$bindir" ] && [ -w "$bindir" ] || continue
+  rm -f "$bindir/cf-hosts" 2>/dev/null
+  if ln -sf "$DIR/cf-hosts.sh" "$bindir/cf-hosts" 2>/dev/null && { [ -L "$bindir/cf-hosts" ] || [ -s "$bindir/cf-hosts" ]; }; then
+    CMD_OK="$bindir/cf-hosts"; break
+  fi
+  rm -f "$bindir/cf-hosts" 2>/dev/null   # ln 失败可能留下垃圾文件，清掉再试下一个目录
+done
+if [ -n "$CMD_OK" ]; then
+  say "已注册全局命令: $CMD_OK（任何目录直接: cf-hosts update / cf-hosts domains add ...）"
+else
+  say "未能写入 /usr/local/bin（需要 root）。手动注册: ln -sf $DIR/cf-hosts.sh /usr/local/bin/cf-hosts"
+  say "或加 alias: echo \"alias cf-hosts='bash $DIR/cf-hosts.sh'\" >> ~/.bashrc"
+fi
+
 LANIP=$(hostname -I 2>/dev/null | awk '{print $1}')
 say "完成 ✅  安装目录: $DIR"
-say "加站点 : bash $DIR/cf-hosts.sh domains add tracker.你的域名.com"
-say "看状态 : bash $DIR/cf-hosts.sh status"
-say "改频率 : bash $DIR/cf-hosts.sh interval 30"
+say "加站点 : cf-hosts domains add tracker.你的域名.com"
+say "看状态 : cf-hosts status"
+say "改频率 : cf-hosts interval 30"
 say "日志   : $DIR/cf-hosts.log"
 [ -n "${LANIP:-}" ] && say "本机IP: $LANIP（仅供参考）"

@@ -2,7 +2,20 @@
 # cf-hosts — 自动优选 Cloudflare IP 写入 hosts 托管区段（纯 shell，零运行时依赖）
 # 解决 PT tracker / Cloudflare 站点在国内宽带（尤其移动）下连不上。
 set -u
-CF_HOME="${CF_HOME:-$(cd "$(dirname "$0")" && pwd)}"
+# 解析自身真实路径（支持通过符号链接调用，如 /usr/local/bin/cf-hosts → 安装目录/cf-hosts.sh）
+# readlink 对非符号链接会返回失败，循环自然结束；最多解析 20 层防成环
+SELF="$0"
+_ln=0
+while [ "$_ln" -lt 20 ]; do
+  _t="$(readlink "$SELF" 2>/dev/null)" || break
+  [ -z "$_t" ] && break
+  case "$_t" in
+    /*) SELF="$_t";;
+    *)  SELF="$(dirname "$SELF")/$_t";;
+  esac
+  _ln=$((_ln+1))
+done
+CF_HOME="${CF_HOME:-$(cd -P "$(dirname "$SELF")" 2>/dev/null && pwd)}"
 CONF="$CF_HOME/cf-hosts.conf"
 STATE="$CF_HOME/state"
 LOG="$CF_HOME/cf-hosts.log"
@@ -99,7 +112,8 @@ refresh_cron(){
 usage(){
   cat <<EOF
 cf-hosts（纯 shell，零依赖）
-用法: bash cf-hosts.sh <命令> [参数]
+用法: cf-hosts <命令> [参数]        # 安装后任何目录直接打 cf-hosts
+      bash <安装目录>/cf-hosts.sh <命令> [参数]   # 或全路径运行
   update                 立即优选一次并写入 hosts
   ip                     当前优选 IP
   status                 状态总览

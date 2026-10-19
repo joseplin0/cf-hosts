@@ -25,24 +25,30 @@ curl -fsSL https://raw.githubusercontent.com/joseplin0/cf-hosts/main/install.sh 
 
 - 安装脚本内置多镜像自动回退（jsdelivr / ghfast.top），CloudflareSpeedTest 二进制下载也有 GitHub 直连 + ghproxy 镜像链，哪条通用哪条。
 - 会自动判断安装目录：QNAP→`/share/Container/cf-hosts`，其他→`~/.cf-hosts`（可用 `CF_INSTALL_DIR=/your/dir` 覆盖）。
-- 装完按提示加站点、看状态即可。
+- 装完自动注册全局命令 `cf-hosts`（ln 到 `/usr/local/bin` 等），并立即优选一次。
 - ⚠️ jsdelivr 对 `@main` 分支缓存最长约 12 小时：刚推送的新版本若装到旧文件，等一会儿或用 `@commit` 短哈希固定版本。
 
 ## 命令行
 
+安装后自动注册全局命令 `cf-hosts`（符号链接进 `/usr/local/bin` 等 PATH 目录），**任何目录直接打**：
+
 ```bash
-bash cf-hosts.sh domains add tracker.a.com tracker.b.com   # 添加站点
-bash cf-hosts.sh domains remove tracker.a.com              # 删除
-bash cf-hosts.sh domains                                   # 查看
-bash cf-hosts.sh interval 30                               # 每 30 分钟（同步改 cron）
-bash cf-hosts.sh auto off                                  # 关自动（on 开）
-bash cf-hosts.sh update                                    # 立即优选一次
-bash cf-hosts.sh ip                                        # 当前优选 IP
-bash cf-hosts.sh status                                    # 状态总览
-bash cf-hosts.sh refresh                                   # 重写 cron 定时
-bash cf-hosts.sh clean                                     # 清理 hosts 托管区段
-bash cf-hosts.sh help                                      # 帮助
+cf-hosts domains add tracker.a.com tracker.b.com   # 添加站点
+cf-hosts domains remove tracker.a.com              # 删除
+cf-hosts domains                                   # 查看
+cf-hosts interval 30                               # 每 30 分钟（同步改 cron）
+cf-hosts auto off                                  # 关自动（on 开）
+cf-hosts update                                    # 立即优选一次
+cf-hosts ip                                        # 当前优选 IP
+cf-hosts status                                    # 状态总览
+cf-hosts refresh                                   # 重写 cron 定时
+cf-hosts clean                                     # 清理 hosts 托管区段
+cf-hosts help                                      # 帮助
 ```
+
+> 没注册成功（如非 root）时，用全路径等价：`bash /share/Container/cf-hosts/cf-hosts.sh <命令>`；
+> 或手动注册：`ln -sf /share/Container/cf-hosts/cf-hosts.sh /usr/local/bin/cf-hosts`；
+> 也可加 alias：`echo "alias cf-hosts='bash /share/Container/cf-hosts/cf-hosts.sh'" >> ~/.bashrc`（仅交互 shell 生效，cron 不读）。
 
 ## 配置 `cf-hosts.conf`（安装时生成，可手改；样例见 `cf-hosts.conf.example`）
 
