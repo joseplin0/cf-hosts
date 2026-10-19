@@ -10,14 +10,23 @@
 
 ## 一键安装（远端，推荐）
 
-在 QNAP / Linux / macOS 上直接粘贴：
+**国内网络（raw.githubusercontent.com 常被 TLS 重置，用 jsdelivr 镜像）：**
+
+```bash
+curl -fsSL https://cdn.jsdelivr.net/gh/joseplin0/cf-hosts@main/install.sh \
+  | REPO_RAW=https://cdn.jsdelivr.net/gh/joseplin0/cf-hosts@main bash
+```
+
+**网络环境好时（官方 raw 源）：**
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/joseplin0/cf-hosts/main/install.sh | bash
 ```
 
+- 安装脚本内置多镜像自动回退（jsdelivr / ghfast.top），CloudflareSpeedTest 二进制下载也有 GitHub 直连 + ghproxy 镜像链，哪条通用哪条。
 - 会自动判断安装目录：QNAP→`/share/Container/cf-hosts`，其他→`~/.cf-hosts`（可用 `CF_INSTALL_DIR=/your/dir` 覆盖）。
 - 装完按提示加站点、看状态即可。
+- ⚠️ jsdelivr 对 `@main` 分支缓存最长约 12 小时：刚推送的新版本若装到旧文件，等一会儿或用 `@commit` 短哈希固定版本。
 
 ## 命令行
 
@@ -53,19 +62,13 @@ bash cf-hosts.sh help                                      # 帮助
 
 ## 推送到 GitHub（自己部署时）
 
+仓库已上线：**https://github.com/joseplin0/cf-hosts**（推送后 raw / jsdelivr 地址即指向 `main` 分支）。
+本地改完提交并推送：
+
 ```bash
 cd cf-hosts
-git init -b main
-git add -A
-git config user.name  "joseplin0"
-git config user.email "你的邮箱@example.com"
-git commit -m "cf-hosts: 自动优选 Cloudflare IP 写入 hosts"
-git branch -M main
-git remote add origin https://github.com/joseplin0/cf-hosts.git
-git push -u origin main
+git add -A && git commit -m "update" && git push
 ```
-
-推送后，上面那条 `curl ... | bash` 就能用了（raw 地址指向 `main` 分支）。
 
 ## QNAP 说明
 
@@ -84,6 +87,7 @@ bash uninstall.sh
 ## 排障
 
 - 日志：`cf-hosts.log`（安装目录）；`result.csv` 是最近一次测速明细。
-- 「找不到可执行的 CloudflareSpeedTest」= 手动下载对应平台版放进安装目录并 `chmod +x`（GitHub: XIU2/CloudflareSpeedTest）。
+- `curl: (35) OpenSSL SSL_connect: Connection reset by peer ... raw.githubusercontent.com` = 国内宽带对该域名 TLS 重置，改用 README 顶部的 **jsdelivr 镜像命令**安装。
+- 「找不到可执行的 CloudflareSpeedTest」= 手动下载对应平台版放进安装目录并 `chmod +x`（GitHub: XIU2/CloudflareSpeedTest；国内可用 ghfast.top 等镜像）。
 - 优选为空：把 `MAX_MS` 调大（如 400）或 `MAX_LOSS` 调高（如 10）。
 - 换测速端口/线程等高级参数，可直接改 `cf-hosts.sh` 里 `best_ip()` 的 `-n 200 -tl -tll`。

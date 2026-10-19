@@ -7,7 +7,9 @@ CONF="$CF_HOME/cf-hosts.conf"
 STATE="$CF_HOME/state"
 LOG="$CF_HOME/cf-hosts.log"
 BEGIN="# >>> cf-hosts BEGIN >>>"
-END="# >>> cf-hosts END >>>"
+END="# <<< cf-hosts END <<<"
+# 兼容旧版误写的 END 标记（# >>> cf-hosts END >>>）
+END_RE="cf-hosts END"
 
 # ---- 默认值（被 cf-hosts.conf 覆盖）----
 PORT=9876
@@ -20,6 +22,9 @@ HOSTS="/etc/hosts"
 DOMAINS=""
 CF_BIN="$CF_HOME/CloudflareSpeedTest"
 [ -f "$CONF" ] && . "$CONF"
+# 相对路径统一相对 CF_HOME 解析（cron 的 cwd 是 $HOME，相对路径会找不到）
+case "$CF_BIN" in /*) ;; *) CF_BIN="$CF_HOME/$CF_BIN";; esac
+case "$HOSTS"  in /*) ;; *) HOSTS="$CF_HOME/$HOSTS";;  esac
 
 log(){ echo "[$(date '+%F %T')] $*" | tee -a "$LOG" >&2; }
 
@@ -40,26 +45,29 @@ EOF
 
 best_ip(){
   [ -x "$CF_BIN" ] || { log "找不到可执行的 CloudflareSpeedTest: $CF_BIN"; echo ""; return; }
-  local out="$CF_HOME/result.csv" ip=""
+  local out="$CF_HOME/result.csv" ip="" raw="$CF_HOME/cst_run.log"
   if [ "$USE_IPV6" = "on" ]; then
-    "$CF_BIN" -ipv6 -tl "$MAX_MS" -tll "$MAX_LOSS" -n 200 -o "$out" >/dev/null 2>&1
+    "$CF_BIN" -ipv6 -tl "$MAX_MS" -tll "$MAX_LOSS" -n 200 -o "$out" >"$raw" 2>&1
     ip=$(grep -oE '^[0-9a-fA-F]{0,4}:[0-9a-fA-F:]+' "$out" 2>/dev/null | head -1)
   else
-    "$CF_BIN" -ipv4 -tl "$MAX_MS" -tll "$MAX_LOSS" -n 200 -o "$out" >/dev/null 2>&1
+    "$CF_BIN" -ipv4 -tl "$MAX_MS" -tll "$MAX_LOSS" -n 200 -o "$out" >"$raw" 2>&1
     ip=$(grep -oE '^[0-9]{1,3}(\.[0-9]{1,3}){3}' "$out" 2>/dev/null | head -1)
   fi
+  [ -z "$ip" ] && [ -s "$raw" ] && log "CloudflareSpeedTest 输出: $(tail -2 "$raw" | tr '\n' ' ')"
   echo "$ip"
 }
 
 update_hosts(){ # $1=ip
-  awk -v b="$BEGIN" -v e="$END" -v ip="$1" -v doms="$DOMAINS" '
-    $0==b{skip=1;next} $0==e{skip=0;next} !skip{print}
-    END{ print b; n=split(doms,a," "); for(i=1;i<=n;i++) if(a[i]!="") print ip"\t"a[i]; print e }
+  awk -v b="$BEGIN" -v e="$END" -v ere="$END_RE" -v ip="$1" -v doms="$DOMAINS" '
+    $0==b{ if(!done){ print b; n=split(doms,a," "); for(i=1;i<=n;i++) if(a[i]!="") print ip"\t"a[i]; print e; done=1 } skip=1; next }
+    skip && $0 ~ ere{skip=0;next}
+    !skip{print}
+    END{ if(!done){ print b; n=split(doms,a," "); for(i=1;i<=n;i++) if(a[i]!="") print ip"\t"a[i]; print e } }
   ' "$HOSTS" > "$HOSTS.cfhosts.tmp" && mv "$HOSTS.cfhosts.tmp" "$HOSTS"
 }
 
 clean_hosts(){
-  awk -v b="$BEGIN" -v e="$END" '$0==b{skip=1;next} $0==e{skip=0;next} !skip{print}' \
+  awk -v b="$BEGIN" -v ere="$END_RE" '$0==b{skip=1;next} skip && $0 ~ ere{skip=0;next} !skip{print}' \
     "$HOSTS" > "$HOSTS.cfhosts.tmp" && mv "$HOSTS.cfhosts.tmp" "$HOSTS"
 }
 
@@ -67,7 +75,7 @@ cmd_update(){
   local fam=IPv4; [ "$USE_IPV6" = "on" ] && fam=IPv6
   local ip; ip=$(best_ip)
   if [ -z "$ip" ]; then log "更新失败：未获取到优选 IP（检查 CF_BIN/网络，或调大 MAX_MS/MAX_LOSS）"; return 1; fi
-  update_hosts "$ip"
+  if ! update_hosts "$ip"; then log "写入 $HOSTS 失败（文件不存在或无权限）"; return 1; fi
   echo "$ip" > "$STATE"
   log "优选 $fam = $ip 已写入 $HOSTS（域名：${DOMAINS:-无}）"
 }
