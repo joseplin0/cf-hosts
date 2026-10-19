@@ -10,23 +10,40 @@
 
 ## 一键安装（远端，推荐）
 
-**国内网络（raw.githubusercontent.com 常被 TLS 重置，用 jsdelivr 镜像）：**
+**国内移动/电信宽带（raw.githubusercontent.com 和 jsdelivr 都是 Fastly，会被 TLS 重置）——用 codeload 官方 tarball：**
 
 ```bash
+D=$(mktemp -d) && curl -fsSL https://codeload.github.com/joseplin0/cf-hosts/tar.gz/refs/heads/main \
+  | tar -xz -C "$D" && bash "$D"/cf-hosts-*/install.sh
+```
+
+**或者 git clone（github.com 可达时最快）：**
+
+```bash
+git clone --depth 1 https://github.com/joseplin0/cf-hosts.git /share/Container/cf-hosts \
+  && bash /share/Container/cf-hosts/install.sh
+```
+
+**网络环境好时（raw / jsdelivr 源的 curl|bash）：**
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/joseplin0/cf-hosts/main/install.sh | bash
 curl -fsSL https://cdn.jsdelivr.net/gh/joseplin0/cf-hosts@main/install.sh \
   | REPO_RAW=https://cdn.jsdelivr.net/gh/joseplin0/cf-hosts@main bash
 ```
 
-**网络环境好时（官方 raw 源）：**
+- 安装脚本会自动选择可达路径：**本地已有完整项目 → 直接复制；codeload tarball → 一次拿全量；都不行 → 逐文件镜像（raw/jsdelivr/ghfast）**。
+- 自动判断安装目录：QNAP→`/share/Container/cf-hosts`，其他→`~/.cf-hosts`（可用 `CF_INSTALL_DIR=/your/dir` 覆盖）。
+- 装完自动注册全局命令 `cf-hosts` 并立即优选一次。
 
-```bash
-curl -fsSL https://raw.githubusercontent.com/joseplin0/cf-hosts/main/install.sh | bash
-```
+## 测速方式（两种，自动选择）
 
-- 安装脚本内置多镜像自动回退（jsdelivr / ghfast.top），CloudflareSpeedTest 二进制下载也有 GitHub 直连 + ghproxy 镜像链，哪条通用哪条。
-- 会自动判断安装目录：QNAP→`/share/Container/cf-hosts`，其他→`~/.cf-hosts`（可用 `CF_INSTALL_DIR=/your/dir` 覆盖）。
-- 装完自动注册全局命令 `cf-hosts`（ln 到 `/usr/local/bin` 等），并立即优选一次。
-- ⚠️ jsdelivr 对 `@main` 分支缓存最长约 12 小时：刚推送的新版本若装到旧文件，等一会儿或用 `@commit` 短哈希固定版本。
+| 方式 | 条件 | 说明 |
+|---|---|---|
+| CloudflareSpeedTest 二进制 | 安装时下载成功（或手动放到安装目录） | 完整测速（延迟+丢包+下载速度），结果最准 |
+| **内置探针** | 二进制缺失**自动启用** | 纯 curl 对候选 Cloudflare IP 逐个测 TTFB（带正确 SNI，方法与 cfst 相同），并行探测取最快。**零外部二进制**，国内 GitHub release 常被 502/重置时保证可用 |
+
+> 国内宽带下 GitHub release 下载基本必挂，所以实际大多数情况会用内置探针——这就够了：选出的 IP 直接写进 hosts，tracker 立即走最优线路。
 
 ## 命令行
 
@@ -65,6 +82,7 @@ cf-hosts help                                      # 帮助
 
 > 只加**走 Cloudflare** 的 tracker：`nslookup 域名`，IP 在 `104.16-31 / 172.64-72 / 162.158 / 188.114` 等段才算；非 Cloudflare 域名加进来无效。
 > 数据目录默认为程序所在目录，可用环境变量 `CF_HOME` 改到别处。
+> 内置探针高级参数（环境变量）：`CF_PROBE_HOST`（探测用域名，默认 cloudflare.com）、`CF_PROBE_PATH`（默认 /cdn-cgi/trace）、`CF_PROBE_PAR`（并行数，默认 24）。
 
 ## 推送到 GitHub（自己部署时）
 
@@ -92,8 +110,8 @@ bash uninstall.sh
 
 ## 排障
 
-- 日志：`cf-hosts.log`（安装目录）；`result.csv` 是最近一次测速明细。
-- `curl: (35) OpenSSL SSL_connect: Connection reset by peer ... raw.githubusercontent.com` = 国内宽带对该域名 TLS 重置，改用 README 顶部的 **jsdelivr 镜像命令**安装。
-- 「找不到可执行的 CloudflareSpeedTest」= 手动下载对应平台版放进安装目录并 `chmod +x`（GitHub: XIU2/CloudflareSpeedTest；国内可用 ghfast.top 等镜像）。
-- 优选为空：把 `MAX_MS` 调大（如 400）或 `MAX_LOSS` 调高（如 10）。
+- 日志：`cf-hosts.log`（安装目录）；`result.csv` 是最近一次测速明细（内置探针不产出）。
+- `curl: (35) OpenSSL SSL_connect: Connection reset by peer` → raw.githubusercontent.com / cdn.jsdelivr.net（均 Fastly）在你这条宽带被重置，**改用 README 顶部的 codeload tarball 安装命令**（ghfast/gh-proxy 等镜像也常挂）。
+- 日志出现「改用内置探针」= 没找到 CloudflareSpeedTest 二进制，正常现象，功能不受影响；想用完整测速就手动下载对应平台版放进安装目录并 `chmod +x`。
+- 优选为空：把 `MAX_MS` 调大（如 400）；内置探针即使全部超阈值也会选最快的采用（日志会记警告）。
 - 换测速端口/线程等高级参数，可直接改 `cf-hosts.sh` 里 `best_ip()` 的 `-n 200 -tl -tll`。

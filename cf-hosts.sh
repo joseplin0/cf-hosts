@@ -70,6 +70,55 @@ best_ip(){
   echo "$ip"
 }
 
+# ---- 内置探针：没有 CloudflareSpeedTest 二进制时的降级方案 ----
+# 原理与 cfst 相同：对候选 Cloudflare IP 逐个发起带正确 SNI 的 HTTPS 请求，测 TTFB，取最快。
+# 只用 curl，零外部二进制；国内宽带下 GitHub release 下载常被 502/重置，此方案保证可用。
+CF_PROBE_HOST="${CF_PROBE_HOST:-cloudflare.com}"
+CF_PROBE_PATH="${CF_PROBE_PATH:-/cdn-cgi/trace}"
+CF_PROBE_PAR="${CF_PROBE_PAR:-24}"
+builtin_candidates(){
+  # Cloudflare Anycast 主要网段采样（与 cfst 默认测试段一致的代表性 IP）
+  local p
+  for p in 104.16 104.17 104.18 104.19 104.20 104.21 104.22 104.23 104.24 104.25 104.26 104.27 104.28 104.29 104.30 104.31 \
+           172.64 172.65 172.66 172.67 172.68 172.69 172.70 172.71 \
+           162.158 162.159 \
+           188.114.96 188.114.97 188.114.98 188.114.99 188.114.104 188.114.108 188.114.111 \
+           198.41.192 198.41.193 198.41.194 198.41.195 198.41.200 198.41.201 198.41.202 198.41.203 \
+           141.101.64 141.101.65 141.101.66 141.101.67 141.101.68 141.101.69 141.101.70 141.101.71 \
+           108.162.192 108.162.193 108.162.194 108.162.195 108.162.196 108.162.200 108.162.204 108.162.208 108.162.220 108.162.224 108.162.228 108.162.232 108.162.236 108.162.240 108.162.244 108.162.248 108.162.252; do
+    echo "$p.1" "$p.128"
+  done
+}
+best_ip_builtin(){
+  command -v curl >/dev/null 2>&1 || { log "内置探针需要 curl，但系统没有"; echo ""; return; }
+  local out ip t ms best="" bestms=999999 i=0
+  # 并行探测：后台子shell直接输出 "ttfb ip"（单行 echo 原子写，由命令替换统一收集，无需临时文件）
+  out=$(
+    for ip in $(builtin_candidates); do
+      (
+        t=$(curl -k -s -o /dev/null --connect-timeout 2 --max-time 4 \
+          -w '%{time_starttransfer}' \
+          --resolve "$CF_PROBE_HOST:443:$ip" "https://$CF_PROBE_HOST$CF_PROBE_PATH" 2>/dev/null)
+        case "$t" in ''|0.000000) ;; *) echo "$t $ip";; esac
+      ) &
+      i=$((i+1))
+      [ $((i % CF_PROBE_PAR)) -eq 0 ] && wait
+    done
+    wait
+  )
+  while read -r t ip; do
+    case "$t" in ''|0.000000) continue;; esac
+    ms=$(awk -v t="$t" 'BEGIN{printf "%d", t*1000}' 2>/dev/null)
+    case "$ms" in ''|*[!0-9]*) continue;; esac
+    if [ "$ms" -lt "$bestms" ]; then bestms="$ms"; best="$ip"; fi
+  done <<< "$out"
+  [ -n "$best" ] || { log "内置探针：所有候选 IP 均不可达"; echo ""; return; }
+  if [ "$bestms" -gt "$MAX_MS" ]; then
+    log "内置探针：最快 $best = ${bestms}ms 超过 MAX_MS=${MAX_MS}，仍采用（聊胜于无）"
+  fi
+  echo "$best"
+}
+
 update_hosts(){ # $1=ip
   awk -v b="$BEGIN" -v e="$END" -v ere="$END_RE" -v ip="$1" -v doms="$DOMAINS" '
     $0==b{ if(!done){ print b; n=split(doms,a," "); for(i=1;i<=n;i++) if(a[i]!="") print ip"\t"a[i]; print e; done=1 } skip=1; next }
@@ -86,11 +135,17 @@ clean_hosts(){
 
 cmd_update(){
   local fam=IPv4; [ "$USE_IPV6" = "on" ] && fam=IPv6
-  local ip; ip=$(best_ip)
-  if [ -z "$ip" ]; then log "更新失败：未获取到优选 IP（检查 CF_BIN/网络，或调大 MAX_MS/MAX_LOSS）"; return 1; fi
+  local ip="" method=""
+  if [ -x "$CF_BIN" ]; then
+    ip=$(best_ip); method="CloudflareSpeedTest"
+  else
+    log "未安装 CloudflareSpeedTest，改用内置探针（curl 测 TTFB，无需外部二进制）..."
+    ip=$(best_ip_builtin); method="内置探针"
+  fi
+  if [ -z "$ip" ]; then log "更新失败：未获取到优选 IP（检查网络，或调大 MAX_MS/MAX_LOSS）"; return 1; fi
   if ! update_hosts "$ip"; then log "写入 $HOSTS 失败（文件不存在或无权限）"; return 1; fi
   echo "$ip" > "$STATE"
-  log "优选 $fam = $ip 已写入 $HOSTS（域名：${DOMAINS:-无}）"
+  log "优选 $fam = $ip 已写入 $HOSTS（方式：$method，域名：${DOMAINS:-无}）"
 }
 
 refresh_cron(){
@@ -137,7 +192,8 @@ case "${1:-}" in
     echo "  域名   : ${DOMAINS:-（空）}"
     echo "  频率   : 每 ${INTERVAL} 分钟（auto=$AUTO, ipv6=$USE_IPV6, 延迟<${MAX_MS}ms, 丢包<${MAX_LOSS}%）"
     echo "  hosts  : $HOSTS"
-    echo "  测速   : $CF_BIN"
+    if [ -x "$CF_BIN" ]; then echo "  测速   : $CF_BIN"
+    else echo "  测速   : 内置探针（curl，未安装 CloudflareSpeedTest 时自动启用）"; fi
     echo "  日志   : $LOG" ;;
   domains)
     action="${2:-list}"
