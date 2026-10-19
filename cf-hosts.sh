@@ -58,12 +58,21 @@ EOF
 
 best_ip(){
   [ -x "$CF_BIN" ] || { log "找不到可执行的 CloudflareSpeedTest: $CF_BIN"; echo ""; return; }
-  local out="$CF_HOME/result.csv" ip="" raw="$CF_HOME/cst_run.log"
+  local out="$CF_HOME/result.csv" ip="" raw="$CF_HOME/cst_run.log" args=""
+  # v2.3+ 已移除 -ipv4 / -ipv6 参数（传进去会被当成未知参数，直接打印帮助退出），
+  # IPv6 改为通过 -f ipv6.txt 指定 IPv6 段文件切换
+  args="-tl $MAX_MS -tll $MAX_LOSS -n 200 -o $out"
   if [ "$USE_IPV6" = "on" ]; then
-    "$CF_BIN" -ipv6 -tl "$MAX_MS" -tll "$MAX_LOSS" -n 200 -o "$out" >"$raw" 2>&1
+    if [ -f "$CF_HOME/ipv6.txt" ]; then
+      args="-f $CF_HOME/ipv6.txt $args"
+    else
+      log "缺少 $CF_HOME/ipv6.txt（cfst 压缩包自带），IPv6 优选暂不可用"; echo ""; return
+    fi
+  fi
+  "$CF_BIN" $args >"$raw" 2>&1
+  if [ "$USE_IPV6" = "on" ]; then
     ip=$(grep -oE '^[0-9a-fA-F]{0,4}:[0-9a-fA-F:]+' "$out" 2>/dev/null | head -1)
   else
-    "$CF_BIN" -ipv4 -tl "$MAX_MS" -tll "$MAX_LOSS" -n 200 -o "$out" >"$raw" 2>&1
     ip=$(grep -oE '^[0-9]{1,3}(\.[0-9]{1,3}){3}' "$out" 2>/dev/null | head -1)
   fi
   [ -z "$ip" ] && [ -s "$raw" ] && log "CloudflareSpeedTest 输出: $(tail -2 "$raw" | tr '\n' ' ')"
@@ -137,6 +146,11 @@ cmd_update(){
   local ip="" method=""
   if [ -x "$CF_BIN" ]; then
     ip=$(best_ip); method="CloudflareSpeedTest"
+    if [ -z "$ip" ]; then
+      # 二进制存在却没产出（版本不兼容 / 参数变化 / 网络全挂），不要卡死：自动降级到内置探针
+      log "CloudflareSpeedTest 未产出结果，自动回退内置探针"
+      ip=$(best_ip_builtin); method="内置探针"
+    fi
   else
     log "未安装 CloudflareSpeedTest，改用内置探针（curl 测 TTFB，无需外部二进制）..."
     ip=$(best_ip_builtin); method="内置探针"
@@ -161,7 +175,11 @@ refresh_cron(){
     else
       echo "0 * * * * \"$CF_HOME/cf-hosts.sh\" update >> \"$LOG\" 2>&1"
     fi
-  } | crontab - 2>/dev/null && log "已更新 cron 定时（每 $INTERVAL 分钟 + 开机）" || log "写入 crontab 失败"
+  } | crontab - 2>/dev/null && log "已更新 cron 定时（每 $INTERVAL 分钟 + 开机）" || {
+    log "写入 crontab 失败（该用户无权使用 cron，或 NAS 未启用 cron 服务）"
+    log "· QNAP/群晖：到「控制台 → 系统 → 任务计划」添加两条定时任务，命令填 bash \"$CF_HOME/cf-hosts.sh\" update（开机一次 + 每 $INTERVAL 分钟）"
+    log "· 或用 root 重跑一次: sudo bash \"$CF_HOME/cf-hosts.sh\" refresh"
+  }
 }
 
 # ---- 全局命令注册 / 注销 ----
