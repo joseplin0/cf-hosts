@@ -62,12 +62,17 @@ best_ip(){
   # v2.3+ 已移除 -ipv4 / -ipv6 参数（传进去会被当成未知参数，直接打印帮助退出），
   # IPv6 改为通过 -f ipv6.txt 指定 IPv6 段文件切换
   args="-tl $MAX_MS -tll $MAX_LOSS -n 200 -o $out"
+  # cfst 默认读【当前目录】的 ip.txt，cron/手动执行时 cwd 不一定是安装目录 → 必须显式指定
   if [ "$USE_IPV6" = "on" ]; then
     if [ -f "$CF_HOME/ipv6.txt" ]; then
       args="-f $CF_HOME/ipv6.txt $args"
+    elif [ -f /etc/cf-hosts/ipv6.txt ]; then
+      args="-f /etc/cf-hosts/ipv6.txt $args"
     else
-      log "缺少 $CF_HOME/ipv6.txt（cfst 压缩包自带），IPv6 优选暂不可用"; echo ""; return
+      log "缺少 ipv6.txt（cfst 压缩包自带，请放到 $CF_HOME），IPv6 优选暂不可用"; echo ""; return
     fi
+  elif [ -f "$CF_HOME/ip.txt" ]; then
+    args="-f $CF_HOME/ip.txt $args"
   fi
   "$CF_BIN" $args >"$raw" 2>&1
   if [ "$USE_IPV6" = "on" ]; then
@@ -79,87 +84,53 @@ best_ip(){
   echo "$ip"
 }
 
-# ---- 内置探针：没有 CloudflareSpeedTest 二进制时的降级方案 ----
-# 原理与 cfst 相同：对候选 Cloudflare IP 逐个发起带正确 SNI 的 HTTPS 请求，测 TTFB，取最快。
-# 只用 curl，零外部二进制；国内宽带下 GitHub release 下载常被 502/重置，此方案保证可用。
-CF_PROBE_HOST="${CF_PROBE_HOST:-cloudflare.com}"
-CF_PROBE_PATH="${CF_PROBE_PATH:-/cdn-cgi/trace}"
-CF_PROBE_PAR="${CF_PROBE_PAR:-24}"
-builtin_candidates(){
-  # Cloudflare Anycast 主要网段采样（与 cfst 默认测试段一致的代表性 IP）
-  local p
-  for p in 104.16 104.17 104.18 104.19 104.20 104.21 104.22 104.23 104.24 104.25 104.26 104.27 104.28 104.29 104.30 104.31 \
-           172.64 172.65 172.66 172.67 172.68 172.69 172.70 172.71 \
-           162.158 162.159 \
-           188.114.96 188.114.97 188.114.98 188.114.99 188.114.104 188.114.108 188.114.111 \
-           198.41.192 198.41.193 198.41.194 198.41.195 198.41.200 198.41.201 198.41.202 198.41.203 \
-           141.101.64 141.101.65 141.101.66 141.101.67 141.101.68 141.101.69 141.101.70 141.101.71 \
-           108.162.192 108.162.193 108.162.194 108.162.195 108.162.196 108.162.200 108.162.204 108.162.208 108.162.220 108.162.224 108.162.228 108.162.232 108.162.236 108.162.240 108.162.244 108.162.248 108.162.252; do
-    echo "$p.1" "$p.128"
-  done
-}
-best_ip_builtin(){
-  command -v curl >/dev/null 2>&1 || { log "内置探针需要 curl，但系统没有"; echo ""; return; }
-  local out="$CF_HOME/probe.txt" ip t ms best="" bestms=999999 i=0
-  rm -f "$out" 2>/dev/null
-  # 并行探测；结果追加到 probe.txt（单行 echo 是原子写，不用加锁）。
-  # 这里刻意不写成多行 $( ... | while ... ) 复合结构：老版本 bash 解析那种写法会报语法错误
-  for ip in $(builtin_candidates); do
-    (
-      t=$(curl -k -s -o /dev/null --connect-timeout 2 --max-time 4 -w '%{time_starttransfer}' --resolve "$CF_PROBE_HOST:443:$ip" "https://$CF_PROBE_HOST$CF_PROBE_PATH" 2>/dev/null)
-      if [ -n "$t" ] && [ "$t" != "0.000000" ]; then echo "$t $ip" >> "$out"; fi
-    ) &
-    i=$((i+1))
-    [ $((i % CF_PROBE_PAR)) -eq 0 ] && wait
-  done
-  wait
-  [ -f "$out" ] || { log "内置探针：所有候选 IP 均不可达"; echo ""; return; }
-  while read -r t ip; do
-    ms=$(awk -v t="$t" 'BEGIN{printf "%d", t*1000}' 2>/dev/null)
-    case "$ms" in ''|*[!0-9]*) continue;; esac
-    if [ "$ms" -lt "$bestms" ]; then bestms="$ms"; best="$ip"; fi
-  done < "$out"
-  rm -f "$out" 2>/dev/null
-  [ -n "$best" ] || { log "内置探针：所有候选 IP 均不可达"; echo ""; return; }
-  if [ "$bestms" -gt "$MAX_MS" ]; then
-    log "内置探针：最快 $best = ${bestms}ms 超过 MAX_MS=${MAX_MS}，仍采用（聊胜于无）"
+# 把 stdin 的内容写进 hosts：临时文件放在 $CF_HOME（/etc 对普通用户不可写，连建 tmp 都会被拒）；
+# 直接写失败时用免密 sudo 兜底，所以普通用户也能更新 /etc/hosts
+hosts_write(){
+  local tmp="$CF_HOME/.hosts.new"
+  cat > "$tmp" 2>/dev/null || { log "无法写入临时文件 $tmp"; return 1; }
+  # 用子 shell 包一层再丢弃 stderr：重定向失败时 shell 自己会打诊断，2>/dev/null 挡不住
+  if ( cat "$tmp" > "$HOSTS" ) 2>/dev/null; then rm -f "$tmp" 2>/dev/null; return 0; fi
+  if command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null \
+     && sudo tee "$HOSTS" < "$tmp" >/dev/null 2>&1; then
+    rm -f "$tmp" 2>/dev/null; log "无 $HOSTS 写权限，已通过 sudo 写入"; return 0
   fi
-  echo "$best"
+  rm -f "$tmp" 2>/dev/null
+  log "写入 $HOSTS 失败：当前用户 $(id -un 2>/dev/null) 无写权限。请执行: sudo bash \"$CF_HOME/cf-hosts.sh\" update"
+  return 1
 }
 
 update_hosts(){ # $1=ip
+  [ -r "$HOSTS" ] || { log "读不到 $HOSTS（不存在或无权读取）"; return 1; }
   awk -v b="$BEGIN" -v e="$END" -v ere="$END_RE" -v ip="$1" -v doms="$DOMAINS" '
     $0==b{ if(!done){ print b; n=split(doms,a," "); for(i=1;i<=n;i++) if(a[i]!="") print ip"\t"a[i]; print e; done=1 } skip=1; next }
     skip && $0 ~ ere{skip=0;next}
     !skip{print}
     END{ if(!done){ print b; n=split(doms,a," "); for(i=1;i<=n;i++) if(a[i]!="") print ip"\t"a[i]; print e } }
-  ' "$HOSTS" > "$HOSTS.cfhosts.tmp" && mv "$HOSTS.cfhosts.tmp" "$HOSTS"
+  ' "$HOSTS" | hosts_write
 }
 
 clean_hosts(){
+  [ -r "$HOSTS" ] || { log "读不到 $HOSTS"; return 1; }
   awk -v b="$BEGIN" -v ere="$END_RE" '$0==b{skip=1;next} skip && $0 ~ ere{skip=0;next} !skip{print}' \
-    "$HOSTS" > "$HOSTS.cfhosts.tmp" && mv "$HOSTS.cfhosts.tmp" "$HOSTS"
+    "$HOSTS" | hosts_write
 }
 
 cmd_update(){
   local fam=IPv4; [ "$USE_IPV6" = "on" ] && fam=IPv6
-  local ip="" method=""
-  if [ -x "$CF_BIN" ]; then
-    ip=$(best_ip); method="CloudflareSpeedTest"
-    if [ -z "$ip" ]; then
-      # 二进制存在却没产出（版本不兼容 / 参数变化 / 网络全挂），不要卡死：自动降级到内置探针
-      log "CloudflareSpeedTest 未产出结果，自动回退内置探针"
-      ip=$(best_ip_builtin); method="内置探针"
-    fi
-  else
-    log "未安装 CloudflareSpeedTest，改用内置探针（curl 测 TTFB，无需外部二进制）..."
-    ip=$(best_ip_builtin); method="内置探针"
+  local ip=""
+  [ -x "$CF_BIN" ] || { log "未找到可执行的测速二进制: $CF_BIN（运行 cf-hosts link 无意义，请重跑 install.sh 或手动放 cfst 进去）"; return 1; }
+  ip=$(best_ip)
+  if [ -z "$ip" ]; then
+    log "优选失败：cfst 没返回结果。常见原因："
+    log "  · 目录里缺 ip.txt / ipv6.txt（cfst 靠 -f 读取 IP 段，别删）→ 重跑 install.sh 补回来"
+    log "  · MAX_MS/MAX_LOSS 阈值太严 → 调大 MAX_MS（如 400）"
+    log "  · 二进制与 CPU 架构不匹配 → 换对应平台版"
+    return 1
   fi
-  if [ -z "$ip" ]; then log "更新失败：未获取到优选 IP（检查网络，或调大 MAX_MS/MAX_LOSS）"; rm -f "$CF_HOME/probe.txt" 2>/dev/null; return 1; fi
-  if ! update_hosts "$ip"; then log "写入 $HOSTS 失败（文件不存在或无权限）"; rm -f "$CF_HOME/probe.txt" 2>/dev/null; return 1; fi
-  rm -f "$CF_HOME/probe.txt" 2>/dev/null   # 探针临时结果
+  if ! update_hosts "$ip"; then return 1; fi
   echo "$ip" > "$STATE"
-  log "优选 $fam = $ip 已写入 $HOSTS（方式：$method，域名：${DOMAINS:-无}）"
+  log "优选 $fam = $ip 已写入 $HOSTS（域名：${DOMAINS:-无}）"
 }
 
 refresh_cron(){
@@ -319,7 +290,12 @@ case "${1:-}" in
     echo "  频率   : 每 ${INTERVAL} 分钟（auto=$AUTO, ipv6=$USE_IPV6, 延迟<${MAX_MS}ms, 丢包<${MAX_LOSS}%）"
     echo "  hosts  : $HOSTS"
     if [ -x "$CF_BIN" ]; then echo "  测速   : $CF_BIN"
-    else echo "  测速   : 内置探针（curl，未安装 CloudflareSpeedTest 时自动启用）"; fi
+    else echo "  测速   : ❌ 缺失！请重跑 install.sh 下载，或手动放 cfst 到 $CF_HOME"; fi
+    if [ "$USE_IPV6" = "on" ]; then
+      [ -f "$CF_HOME/ipv6.txt" ] || echo "  ⚠ 缺 $CF_HOME/ipv6.txt（IPv6 优选必需）"
+    elif [ ! -f "$CF_HOME/ip.txt" ]; then
+      echo "  ⚠ 缺 $CF_HOME/ip.txt（cfst 的 IP 段文件，缺了会报 open ip.txt）"
+    fi
     _c="$(command -v cf-hosts 2>/dev/null)"
     if [ -n "$_c" ]; then echo "  命令   : 已注册 -> $_c"
     else echo "  命令   : 未注册（root 下重跑 install.sh，或执行 cf-hosts link）"; fi

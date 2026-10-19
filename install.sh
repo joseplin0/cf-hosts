@@ -81,12 +81,13 @@ fi
 # ===== 本地安装（$DIR 内含全部文件）=====
 say "环境: $(uname -s 2>/dev/null) / shell: $(bash --version 2>/dev/null | head -n 1)"
 arch_ga(){ case "$(uname -m)" in x86_64|amd64) echo amd64;; aarch64|arm64) echo arm64;; *) echo amd64;; esac; }
-# 只识别 linux/darwin（QNAP/群晖/Linux/macOS）；Windows(msys/mingw)等返回空 → 跳过二进制下载用内置探针
+# 只识别 linux/darwin（QNAP/群晖/Linux/macOS）；Windows(msys/mingw)等返回空 → 跳过二进制下载
 os_lc(){ case "$(uname -s | tr 'A-Z' 'a-z')" in linux*) echo linux;; darwin*) echo darwin;; *) echo "";; esac; }
 
-# 1) 下载 CloudflareSpeedTest（如缺）——非致命：下不到就用内置探针（curl 测 TTFB）
+# 1) 下载 CloudflareSpeedTest（如缺）——优选的核心依赖
 #    注意：资产文件名一律从 releases API 读取，绝不手拼（作者改过命名规则，
 #    旧教程里的 CloudflareSpeedTest_<版本>_linux_amd64.tar.gz 早已是 404）
+#    解压后 ip.txt / ipv6.txt 要保留在目录里：cfst 靠 -f 读取 IP 段，删了会报 open ip.txt
 CFST=""
 if   [ -f "$DIR/cfst" ];                then CFST="$DIR/cfst"
 elif [ -f "$DIR/CloudflareSpeedTest" ]; then CFST="$DIR/CloudflareSpeedTest"
@@ -101,7 +102,7 @@ if [ -n "$CFST" ]; then
 else
   OS=$(os_lc); GA=$(arch_ga)
   if [ -z "$OS" ]; then
-    say "当前系统($(uname -s))无对应 CloudflareSpeedTest 发行版 —— 启用内置探针（curl 测 TTFB），不影响使用"
+    say "当前系统($(uname -s))无对应 CloudflareSpeedTest 发行版 —— 需手动放 cfst 进去，否则无法优选"
   else
     API_URL="https://api.github.com/repos/XIU2/CloudflareSpeedTest/releases/latest"
     [ -n "${CFST_VERSION:-}" ] && API_URL="https://api.github.com/repos/XIU2/CloudflareSpeedTest/releases/tags/v${CFST_VERSION#v}"
@@ -112,7 +113,7 @@ else
     # 写成单行管道（不用 while+case 复合结构），保证老版本 bash 也能解析
     ASSET=$(printf '%s\n' "$JSON" | grep -o '"browser_download_url": *"[^"]*"' | sed -E 's/.*"browser_download_url": *"([^"]*)".*/\1/' | grep -v '_old\.' | grep -E '\.(tar\.gz|tgz|zip)$' | grep -F "$OS" | grep -F "$GA" | head -n 1)
     if [ -z "${ASSET:-}" ]; then
-      say "取不到匹配的资产（GitHub API 不可达或限流）—— 启用内置探针，不影响使用"
+      say "取不到匹配的资产（GitHub API 不可达或限流）—— 需稍后重试或手动放 cfst 进去"
     else
       say "CloudflareSpeedTest v${VER}，资产 ${ASSET##*/}（文件名取自 releases API）"
       DL="$DIR/.cfst_dl"; ok=0; SRC_OK=""
@@ -140,7 +141,7 @@ else
           chmod +x "$DIR/$_base" 2>/dev/null
         fi
         # 是否真的可执行由运行时判定（有些 NAS/共享目录 chmod 不生效，
-        # 这里不因 -x 失败就丢弃已下载好的二进制，cf-hosts.sh 会自动回退内置探针）
+        # 这里不因 -x 失败就丢弃已下载好的二进制，运行时会提示 chmod 后再用）
         if   [ -f "$DIR/cfst" ];                then CFST="$DIR/cfst"; ok=1
         elif [ -f "$DIR/CloudflareSpeedTest" ]; then CFST="$DIR/CloudflareSpeedTest"; ok=1
         else say "  ✘ 包内没找到可执行文件"; fi
@@ -150,10 +151,10 @@ else
         if [ -x "$CFST" ]; then
           say "✔ 测速二进制就位: $CFST"
         else
-          say "⚠ 已放置 $CFST，但该目录无法设置执行位（只读/受限），运行时会自动改用内置探针"
+          say "⚠ 已放置 $CFST，但该目录无法设置执行位（只读/受限），请手动 chmod +x 后使用"
         fi
       else
-        say "所有下载源均失败（GitHub release 在国内常被重置/502）—— 启用内置探针（curl 测 TTFB，零外部二进制），不影响使用"
+        say "所有下载源均失败（GitHub release 在国内常被重置/502）—— 需稍后重跑，或手动下载 cfst 放进本目录"
       fi
     fi
   fi
@@ -195,8 +196,12 @@ LANIP=$(hostname -I 2>/dev/null | awk '{print $1}')
 say "完成 ✅  安装目录: $DIR"
 if [ -n "${CFST:-}" ] && [ -x "$CFST" ]; then
   say "测速方式: CloudflareSpeedTest 二进制 -> $CFST"
+  [ -f "$DIR/ip.txt" ] || say "⚠ 缺 ip.txt（cfst 的 IP 段文件），优选会失败；重跑本脚本可补回"
 else
-  say "测速方式: 内置探针（curl 测 TTFB，零外部二进制）；手里有 cfst 二进制放进 $DIR 即可自动切换为完整测速"
+  say "⚠ 缺少测速二进制：优选无法工作。手动把 cfst（含 ip.txt）放进 $DIR，或重新下载（下载源常被墙，可多试几次）"
+fi
+if [ "$(id -u 2>/dev/null)" != "0" ]; then
+  say "权限提示: 你不是 root。写 /etc/hosts 会自动尝试 sudo（免密才行）；否则请在 QTS「控制台→系统→任务计划」里添加定时（那里以 root 运行），或手动执行 sudo bash $DIR/cf-hosts.sh update"
 fi
 case "$LINK_OUT" in
   *"已注册全局命令"*) : ;;   # 成功：按 link 自己的提示操作即可
