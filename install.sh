@@ -79,6 +79,7 @@ if [ "$need_boot" = "1" ]; then
 fi
 
 # ===== 本地安装（$DIR 内含全部文件）=====
+say "环境: $(uname -s 2>/dev/null) / shell: $(bash --version 2>/dev/null | head -n 1)"
 arch_ga(){ case "$(uname -m)" in x86_64|amd64) echo amd64;; aarch64|arm64) echo arm64;; *) echo amd64;; esac; }
 # 只识别 linux/darwin（QNAP/群晖/Linux/macOS）；Windows(msys/mingw)等返回空 → 跳过二进制下载用内置探针
 os_lc(){ case "$(uname -s | tr 'A-Z' 'a-z')" in linux*) echo linux;; darwin*) echo darwin;; *) echo "";; esac; }
@@ -107,18 +108,9 @@ else
     JSON=$(curl -fsSL --connect-timeout 10 --max-time 30 "$API_URL" 2>/dev/null)
     [ -z "${JSON:-}" ] && JSON=$(curl -fsSL --connect-timeout 10 --max-time 30 "https://api.kkgithub.com/repos/XIU2/CloudflareSpeedTest/releases/latest" 2>/dev/null)
     VER=$(printf '%s\n' "$JSON" | grep -m1 '"tag_name"' | sed -E 's/.*"v?([0-9][^"]*)".*/\1/')
-    # 按当前平台挑出真实资产 URL：排除 *_old 兼容包，限制扩展名/OS/架构
-    ASSET=$(printf '%s\n' "$JSON" \
-      | grep -o '"browser_download_url": *"[^"]*"' \
-      | sed -E 's/.*"browser_download_url": *"([^"]*)".*/\1/' \
-      | while read -r u; do
-          n="${u##*/}"
-          case "$n" in *_old.*) continue;; esac
-          case "$n" in *.tar.gz|*.tgz|*.zip) ;; *) continue;; esac
-          case "$n" in *"$OS"*) ;; *) continue;; esac
-          case "$n" in *"$GA"*) ;; *) continue;; esac
-          echo "$u"; break
-        done)
+    # 按平台挑资产：过滤 *_old 兼容包 / 扩展名 / 系统 / 架构。
+    # 写成单行管道（不用 while+case 复合结构），保证老版本 bash 也能解析
+    ASSET=$(printf '%s\n' "$JSON" | grep -o '"browser_download_url": *"[^"]*"' | sed -E 's/.*"browser_download_url": *"([^"]*)".*/\1/' | grep -v '_old\.' | grep -E '\.(tar\.gz|tgz|zip)$' | grep -F "$OS" | grep -F "$GA" | head -n 1)
     if [ -z "${ASSET:-}" ]; then
       say "取不到匹配的资产（GitHub API 不可达或限流）—— 启用内置探针，不影响使用"
     else

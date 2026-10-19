@@ -91,27 +91,26 @@ builtin_candidates(){
 }
 best_ip_builtin(){
   command -v curl >/dev/null 2>&1 || { log "内置探针需要 curl，但系统没有"; echo ""; return; }
-  local out ip t ms best="" bestms=999999 i=0
-  # 并行探测：后台子shell直接输出 "ttfb ip"（单行 echo 原子写，由命令替换统一收集，无需临时文件）
-  out=$(
-    for ip in $(builtin_candidates); do
-      (
-        t=$(curl -k -s -o /dev/null --connect-timeout 2 --max-time 4 \
-          -w '%{time_starttransfer}' \
-          --resolve "$CF_PROBE_HOST:443:$ip" "https://$CF_PROBE_HOST$CF_PROBE_PATH" 2>/dev/null)
-        case "$t" in ''|0.000000) ;; *) echo "$t $ip";; esac
-      ) &
-      i=$((i+1))
-      [ $((i % CF_PROBE_PAR)) -eq 0 ] && wait
-    done
-    wait
-  )
+  local out="$CF_HOME/probe.txt" ip t ms best="" bestms=999999 i=0
+  rm -f "$out" 2>/dev/null
+  # 并行探测；结果追加到 probe.txt（单行 echo 是原子写，不用加锁）。
+  # 这里刻意不写成多行 $( ... | while ... ) 复合结构：老版本 bash 解析那种写法会报语法错误
+  for ip in $(builtin_candidates); do
+    (
+      t=$(curl -k -s -o /dev/null --connect-timeout 2 --max-time 4 -w '%{time_starttransfer}' --resolve "$CF_PROBE_HOST:443:$ip" "https://$CF_PROBE_HOST$CF_PROBE_PATH" 2>/dev/null)
+      if [ -n "$t" ] && [ "$t" != "0.000000" ]; then echo "$t $ip" >> "$out"; fi
+    ) &
+    i=$((i+1))
+    [ $((i % CF_PROBE_PAR)) -eq 0 ] && wait
+  done
+  wait
+  [ -f "$out" ] || { log "内置探针：所有候选 IP 均不可达"; echo ""; return; }
   while read -r t ip; do
-    case "$t" in ''|0.000000) continue;; esac
     ms=$(awk -v t="$t" 'BEGIN{printf "%d", t*1000}' 2>/dev/null)
     case "$ms" in ''|*[!0-9]*) continue;; esac
     if [ "$ms" -lt "$bestms" ]; then bestms="$ms"; best="$ip"; fi
-  done <<< "$out"
+  done < "$out"
+  rm -f "$out" 2>/dev/null
   [ -n "$best" ] || { log "内置探针：所有候选 IP 均不可达"; echo ""; return; }
   if [ "$bestms" -gt "$MAX_MS" ]; then
     log "内置探针：最快 $best = ${bestms}ms 超过 MAX_MS=${MAX_MS}，仍采用（聊胜于无）"
@@ -142,8 +141,9 @@ cmd_update(){
     log "未安装 CloudflareSpeedTest，改用内置探针（curl 测 TTFB，无需外部二进制）..."
     ip=$(best_ip_builtin); method="内置探针"
   fi
-  if [ -z "$ip" ]; then log "更新失败：未获取到优选 IP（检查网络，或调大 MAX_MS/MAX_LOSS）"; return 1; fi
-  if ! update_hosts "$ip"; then log "写入 $HOSTS 失败（文件不存在或无权限）"; return 1; fi
+  if [ -z "$ip" ]; then log "更新失败：未获取到优选 IP（检查网络，或调大 MAX_MS/MAX_LOSS）"; rm -f "$CF_HOME/probe.txt" 2>/dev/null; return 1; fi
+  if ! update_hosts "$ip"; then log "写入 $HOSTS 失败（文件不存在或无权限）"; rm -f "$CF_HOME/probe.txt" 2>/dev/null; return 1; fi
+  rm -f "$CF_HOME/probe.txt" 2>/dev/null   # 探针临时结果
   echo "$ip" > "$STATE"
   log "优选 $fam = $ip 已写入 $HOSTS（方式：$method，域名：${DOMAINS:-无}）"
 }
